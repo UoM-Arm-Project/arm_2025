@@ -1,0 +1,19 @@
+# The bot's own betting action, executed as /move_pose + /pump_control sequences.
+uint8 FOLD=0
+uint8 CHECK=1
+uint8 CALL=2
+uint8 BET_RAISE=3
+uint8 POST_BLIND=4
+
+uint8 type
+int32 chips            # chips to move from the bot's trays into the pot now
+int32 raise_to         # street total after BET_RAISE (informational)
+bool all_in
+---
+bool success
+string message
+int32[] chip_values    # denominations moved, one entry per chip
+---
+string phase           # label of the current motion step
+uint16 step
+uint16 total_steps

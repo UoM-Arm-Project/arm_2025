@@ -1,0 +1,62 @@
+# Arm-side table layout for poker_skills (skill_executor).
+#
+# EVERYTHING HERE IS IN THE ARM BASE FRAME used by /move_pose
+# (metres, radians: x, y, z, pitch, roll). Values are PLACEHOLDERS seeded from
+# poker_demo/pick_demo_node.py — teach each one with the dashboard's Cartesian
+# panel and copy the numbers in before running on hardware.
+
+motion:
+  travel_z: 0.15          # safe height between places (pick_demo "lift" height)
+  travel_duration: 3.0    # s, MovePose.duration for long moves
+  fine_duration: 2.0      # s, vertical approach / retreat
+  pump_on_settle: 0.5     # s after /pump_control 1
+  pump_off_settle: 0.5    # s after /pump_control 0
+
+poses:
+  home:      {x: 0.11, y: 0.265, z: 0.15, pitch: 0.0, roll: 0.0, duration: 5.0}
+  check_tap: {x: 0.0,  y: 0.22,  z: 0.07}    # knock on the table to check
+
+chips:
+  # value -> tray. Chips are picked by suction from the top of a vertical stack.
+  # base_z = pick height of the LAST chip in the tray; thickness = chip height.
+  trays:
+    5:   {x: 0.16, y: 0.12, base_z: 0.020, thickness: 0.0033, count: 30}
+    25:  {x: 0.19, y: 0.12, base_z: 0.020, thickness: 0.0033, count: 20}
+    100: {x: 0.22, y: 0.12, base_z: 0.020, thickness: 0.0033, count: 10}
+  pot_drop:  {x: 0.0, y: 0.30, z: 0.07}       # release point above the pot
+  pot_spread: 0.012                            # jitter so chips don't tower
+
+cards:
+  pick_z: 0.059           # suction height for a single card on the table
+  drop_z: 0.065           # release height for face-down placement
+  second_card_offset: 0.03
+  deck:                   # face-down deck holder for dealer modes
+    x: -0.16
+    y: 0.20
+    z_bottom: 0.059       # pick height of the LAST card
+    thickness: 0.0003
+  burn: {x: -0.20, y: 0.15}
+  muck: {x: -0.20, y: 0.25}
+  # Face-up release (flip) relative to the target slot, copied from pick_demo:
+  # approach = "flip" pose, release = "drop" pose (dy -0.065, pitch -1.2).
+  face_up_release:
+    approach: {dx: 0.0, dy: 0.0,    z: 0.20, pitch: -0.4, roll: 3.13}
+    release:  {dx: 0.0, dy: -0.065, z: 0.20, pitch: -1.2, roll: 3.13}
+  # pick_demo card slots along x = 0.13 .. -0.13 at y 0.265 -> board slots
+  board_slots:
+    - {x: 0.13,   y: 0.265}
+    - {x: 0.065,  y: 0.265}
+    - {x: 0.0,    y: 0.265}
+    - {x: -0.065, y: 0.265}
+    - {x: -0.13,  y: 0.265}
+  # Bot's own hole cards, face-up in a holder only the overhead camera sees
+  bot_hole_slots:
+    - {x: 0.10, y: 0.10}
+    - {x: 0.06, y: 0.10}
+  # Where to drop face-down hole cards for each chair (dealer modes)
+  seat_targets:
+    0: {x: 0.08,  y: 0.12}    # bot chair: unused when it plays (cards go face-up)
+    1: {x: 0.20,  y: 0.30}
+    2: {x: 0.10,  y: 0.38}
+    3: {x: -0.10, y: 0.38}
+    4: {x: -0.20, y: 0.30}

@@ -13,3 +13,5 @@ setuptools
 empy
 lark
 six
+pokerkit==0.7.7
+treys==0.1.8

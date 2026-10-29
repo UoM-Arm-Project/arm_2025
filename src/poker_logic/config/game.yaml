@@ -1,0 +1,29 @@
+# poker_game_manager parameters (ROS 2 params file)
+poker_game_manager:
+  ros__parameters:
+    mode: player              # player | dealer | dealer_player
+    seats: 5                  # physical chairs including the bot (2-6)
+    bot_seat: 0               # chair the bot plays from; ignored in dealer mode
+    first_button: 0
+    small_blind: 5
+    big_blind: 10
+    starting_stack: 1000
+    chip_unit: 5              # smallest chip value; bets snap to this
+
+    policy: equity            # equity | baseline
+    samples: 600              # Monte Carlo samples per decision (lower on a Pi)
+    style: balanced           # cautious | balanced | active
+    range_model: public_actions
+
+    pot_settle_s: 0.8         # wait after a press before trusting the pot reading
+    pot_min_samples: 3
+    pot_tolerance: -1.0       # chips; <0 = half the chip unit
+    gesture_on_check: true
+
+    card_window: 10           # frames for card debouncing
+    card_ratio: 0.7
+    card_min_confidence: 0.5
+    pot_min_confidence: 0.3
+
+    use_gpio_button: true     # treat any /button_count change as "turn done"
+    zones_file: ""            # empty = <share>/config/vision_zones.yaml

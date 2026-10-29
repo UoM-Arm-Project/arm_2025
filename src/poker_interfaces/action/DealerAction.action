@@ -1,0 +1,18 @@
+# Dealer-mode card handling, executed as /move_pose + /pump_control sequences.
+uint8 DEAL_HOLE=0      # deck -> chair (face-down) or bot holder (face_up)
+uint8 BURN=1           # deck -> burn pile
+uint8 DEAL_BOARD=2     # deck -> board slot card_index, flipped face-up
+uint8 RESET_DECK=3     # a fresh 52-card deck has been placed in the holder
+uint8 HOME=4
+
+uint8 type
+uint8 seat
+uint8 card_index       # 0/1 for hole cards, 0..4 board slot
+bool face_up
+---
+bool success
+string message
+---
+string phase
+uint16 step
+uint16 total_steps
