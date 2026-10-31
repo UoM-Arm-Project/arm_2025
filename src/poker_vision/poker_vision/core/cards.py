@@ -51,12 +51,21 @@ class Card:
     conf: float
     corners: int                 # 1 or 2 corner detections merged
     table: Optional[np.ndarray] = None   # centre in the table frame (metres)
+    conflict: str = ""           # e.g. "9S/9C": the two corners disagreed, higher confidence kept
 
 
 def pair_corners(dets: List[Detection], class_map=None,
                  to_table: Optional[Callable[[np.ndarray], np.ndarray]] = None,
-                 max_dist_m: float = 0.12, max_dist_px: float = 500.0) -> List[Card]:
-    """Merge corner detections of the same card. ``to_table`` maps Nx2 pixels -> Nx2 metres."""
+                 max_dist_m: float = 0.12, max_dist_px: float = 500.0,
+                 merge_conflicts: bool = True, min_diag_m: float = 0.02) -> List[Card]:
+    """Merge corner detections of the same card. ``to_table`` maps Nx2 pixels -> Nx2 metres.
+
+    With ``merge_conflicts``, two lone corners that share a rank *or* a suit and
+    sit diagonally from each other at card-corner distance (e.g. 9S top-left +
+    9C bottom-right: one corner misread) are merged into one card with the
+    higher-confidence code and ``conflict`` set. The diagonal test (both |dx|
+    and |dy| >= ``min_diag_m``) keeps two neighbouring cards in a row apart.
+    """
     by_code: Dict[str, List[Detection]] = {}
     for d in dets:
         code = class_to_code(d.name, class_map)
@@ -80,9 +89,42 @@ def pair_corners(dets: List[Detection], class_map=None,
         for i in range(len(group)):
             if i not in used:
                 cards.append(Card(code, px[i], group[i].conf, 1, None if tb is None else tb[i]))
+    if merge_conflicts:
+        cards = _merge_conflicting(cards, max_dist_m if to_table is not None else max_dist_px,
+                                   min_diag_m if to_table is not None else 0.0)
     # A real deck has one of each card: if a code appears twice (misdetection), keep the best
     best: Dict[str, Card] = {}
     for c in cards:
         if c.code not in best or (c.corners, c.conf) > (best[c.code].corners, best[c.code].conf):
             best[c.code] = c
     return sorted(best.values(), key=lambda c: c.code)
+
+
+def _merge_conflicting(cards: List[Card], limit: float, min_diag: float) -> List[Card]:
+    lone = [c for c in cards if c.corners == 1]
+    done = [c for c in cards if c.corners != 1]
+    cand = []
+    for i in range(len(lone)):
+        for j in range(i + 1, len(lone)):
+            a, b = lone[i], lone[j]
+            if a.code == b.code or (a.code[0] != b.code[0] and a.code[1] != b.code[1]):
+                continue                                  # need same rank or same suit
+            pa = a.table if a.table is not None else a.pixel
+            pb = b.table if b.table is not None else b.pixel
+            dx, dy = abs(pa[0] - pb[0]), abs(pa[1] - pb[1])
+            dist = float(np.hypot(dx, dy))
+            if dist > limit or dx < min_diag or dy < min_diag:
+                continue
+            cand.append((dist, i, j))
+    used = set()
+    for _dist, i, j in sorted(cand):
+        if i in used or j in used:
+            continue
+        used.update((i, j))
+        a, b = lone[i], lone[j]
+        keep, other = (a, b) if a.conf >= b.conf else (b, a)
+        done.append(Card(keep.code, (a.pixel + b.pixel) / 2, keep.conf, 2,
+                         None if a.table is None else (a.table + b.table) / 2,
+                         conflict=f"{keep.code}/{other.code}"))
+    done += [c for k, c in enumerate(lone) if k not in used]
+    return done

@@ -42,6 +42,8 @@ class FrameSource:
             return
         if isinstance(src, str) and src.isdigit():
             src = int(src)
+        if isinstance(src, str) and src.startswith("/dev/video") and src[10:].isdigit():
+            src = int(src[10:])
         backend = cv2.CAP_V4L2 if isinstance(src, int) or str(src).startswith("/dev/video") else cv2.CAP_ANY
         self.cap = cv2.VideoCapture(src, backend)
         if not self.cap.isOpened():

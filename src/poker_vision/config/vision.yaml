@@ -1,4 +1,6 @@
-# poker_vision configuration: cameras, table frame, models.
+# poker_vision configuration: cameras, table frame, zones, models.
+# Inference runs ONLY when poker_game_manager calls /vision/read_cards or
+# /vision/read_pot; cameras just keep a fresh frame ready in between.
 # Paths may use ~ and $ENV vars; relative paths are relative to this file.
 # Swap model files / devices here without touching code:
 #   cards.pt  + device: cpu        -> works everywhere (slow)
@@ -13,10 +15,8 @@ overhead_camera:
   fps: 30
   fourcc: MJPG                 # most USB cams only reach 1080p30 in MJPG
   autofocus: false             # fixed focus, as in the notebook (focus drift moves the scale)
-  rate_hz: 10                  # inference rate (frames processed per second)
   frame_id: overhead_camera
-  # Intrinsics from the notebook (placeholder). Calibrate for real accuracy;
-  # all-zero dist_coeffs = no undistortion.
+  # Intrinsics from the notebook (placeholder). All-zero dist_coeffs = no undistortion.
   camera_matrix: [[1000.0, 0.0, 960.0],
                   [0.0, 1000.0, 540.0],
                   [0.0, 0.0, 1.0]]
@@ -26,70 +26,85 @@ table_frame:
   mode: homography             # homography (perspective-correct) | scale (notebook method)
   dictionary: DICT_4X4_50
   # Table-frame pose of each printed marker (centre x/y in metres, yaw in degrees).
-  # The first marker at (0, 0) defines the origin, like the notebook. Add 2-4
-  # markers near the table corners for accuracy across the whole table.
+  # The first marker at (0, 0) defines the origin, like the notebook. 2-4
+  # markers near the table corners give mm accuracy across the whole table.
   markers:
     - {id: 0, size: 0.05, x: 0.0, y: 0.0, yaw_deg: 0.0}
   reference_id: 0              # used by mode: scale
   min_markers: 1
-  refresh_every: 5             # re-detect markers every N processed frames
-  smoothing: 0.7               # 0..1, damp jitter between fits
-  lock_after_frames: 0         # >0: freeze the fit after N good frames (camera never moves)
-  max_age_s: 0.0               # 0: keep the last good fit if markers get covered
+  smoothing: 0.0               # reads are one-shot: use each fit as-is
+  lock_after_frames: 0         # >0: freeze the fit after N good reads (camera never moves)
+  max_age_s: 0.0               # 0: keep the last good fit if markers get covered by hands
   corner_refinement: true
 
+# Zones in the TABLE frame (metres). Each card read crops its zone (+ margin)
+# from the full-resolution still, so the 640-px card model sees the cards
+# large. Measure them with:  ros2 run poker_vision vision_probe --image X --click
+zones:
+  - {name: board,    x_min: -0.20, x_max: 0.20, y_min: 0.20, y_max: 0.33}
+  - {name: bot_hole, x_min:  0.02, x_max: 0.14, y_min: 0.05, y_max: 0.15}
+  - {name: seat_1,   x_min:  0.15, x_max: 0.35, y_min: 0.25, y_max: 0.45}
+  - {name: seat_2,   x_min:  0.02, x_max: 0.20, y_min: 0.36, y_max: 0.55}
+  - {name: seat_3,   x_min: -0.20, x_max: -0.02, y_min: 0.36, y_max: 0.55}
+  - {name: seat_4,   x_min: -0.35, x_max: -0.15, y_min: 0.25, y_max: 0.45}
+
 card_model:
+  enabled: true
   backend: ultralytics         # ultralytics | mock
-  weights: ~/poker_arm_ws/models/cards.pt     # PLACEHOLDER: your trained corner model
+  weights: ~/poker_arm_ws/models/cards.pt     # YOLOv8-l, fine-tuned at imgsz 640
   task: detect
   device: cpu                  # cuda:0 once the GPU works
   half: false                  # true with cuda:0 / engine
   imgsz: 640
-  conf: 0.5                    # notebook used conf 0.5, iou 0.6
+  conf: 0.5
   iou: 0.6
   max_det: 60
   warmup: true
+  crop_to_zone: true           # run the model on the zone crop, not the whole table
+  crop_margin_m: 0.03          # extra table around the zone in the crop
+  zone_tolerance_m: 0.02       # card centres may sit this far outside the zone
+  shots: 1                     # >1: read N consecutive frames, keep cards seen in the majority
   pair_max_distance_m: 0.12    # two corners of one card are < ~0.10 m apart
   pair_max_distance_px: 500    # fallback before the table frame is known
-  class_map: {}                # only if class names are not like "AC", "10H", "5D"
-                               # e.g. {ace_of_spades: As}
+  merge_conflicting_corners: true   # 9S + 9C diagonal corners -> one card (higher confidence)
+  conflict_policy: best        # best: keep higher-confidence code | reject: fail the read
+  class_map: {}                # classes are 10C, 2D ... QS: parsed directly, nothing needed
 
 side_camera:
   source: 1
-  width: 1280
-  height: 720
+  width: 1920
+  height: 1080
   fps: 30
   autofocus: false
-  rate_hz: 5
   frame_id: side_camera
 
 pot_model:
+  enabled: true
   backend: ultralytics
-  weights: ~/poker_arm_ws/models/chips-seg.pt # PLACEHOLDER: your chip segmentation model
+  weights: ~/poker_arm_ws/models/chips-seg.pt # YOLOv8-l-seg, fine-tuned at imgsz 1280
   task: segment
   device: cpu
   half: false
-  imgsz: 640
-  conf: 0.4
-  iou: 0.6
-  max_det: 100
+  imgsz: 1280
+  conf: 0.65
+  iou: 0.7
+  max_det: 150
+  classes: [1, 2, 3]           # Blue, Red, White; class 0 (Black) is dropped inside NMS
   warmup: true
-  # How masks become chips (see poker_vision/core/pot.py):
-  count_mode: stack_height     # stack_height | instance | area
-  px_per_chip: 6.0             # side-view stack height per chip, in pixels (measure once)
-  px2_per_chip: 900.0          # for count_mode: area
-  class_values:                # model class name -> chip value (PLACEHOLDER names)
-    chip_5: 5
-    chip_25: 25
-    chip_100: 100
-  default_value: 0             # unknown classes ignored
-  round_to: 5                  # snap the total to the smallest chip
-  roi: []                      # optional pixel polygon of the pot, e.g. [[400,300],[900,300],[900,650],[400,650]]
+  count_mode: instance         # the model segments individual chips: one mask = one chip
+  class_values:                # small-stakes set
+    White: 1
+    Red: 5
+    Blue: 10
+  default_value: 0             # anything else (e.g. Black) is ignored
+  round_to: 0
+  roi: []                      # [x0, y0, x1, y1] pixels: crop to the pot before inference,
+                               # e.g. [150, 400, 1700, 750] for the sample image (chips ~y 480-660)
 
 # Optional fixed transform table frame -> arm base frame, used by vision_probe
 # to print arm coordinates (handy for teaching poses in arm_layout.yaml).
 arm_from_table: {x: 0.0, y: 0.0, yaw_deg: 0.0}
 
 debug:
-  publish_image: true          # /vision/cards/debug and /vision/pot/debug (view with rqt_image_view)
-  show_window: false           # OpenCV windows (needs a display)
+  publish_image: true          # annotated still of every read on /vision/cards/debug, /vision/pot/debug
+  save_dir: ""                 # e.g. ~/poker_arm_ws/vision_log: save every annotated read (dataset gold)

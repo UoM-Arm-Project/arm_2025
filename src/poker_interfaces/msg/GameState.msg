@@ -12,6 +12,7 @@ int32 pot
 int32[] stacks         # per chair
 int32[] bets           # current street contribution per chair
 bool[] in_hand
-string waiting         # what the system is waiting for, human readable
+string waiting         # what the system is waiting for, human readable (the current instruction)
+string expect          # which button press is awaited: hole | board | turn | showdown | next | fixed | "" (busy)
 bool arm_busy
 float32 pot_bias       # vision pot minus engine pot (calibration drift)

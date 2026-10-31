@@ -1,21 +1,17 @@
-"""Shared plumbing for the vision nodes: config, frame source, debug output.
+"""Shared plumbing: image <-> sensor_msgs/Image without cv_bridge, and frame grabbing.
 
-Images are converted to/from sensor_msgs/Image with numpy directly instead of
-cv_bridge, so the nodes work from the workspace venv whatever numpy version
-ultralytics pulls in.
+numpy conversion (instead of cv_bridge) keeps the nodes working from the
+workspace venv whatever numpy version ultralytics installs.
 """
-import os
+import threading
 import time
-from typing import Optional
+from typing import List, Optional
 
 import cv2
 import numpy as np
-from ament_index_python.packages import get_package_share_directory
-from rclpy.node import Node
 from sensor_msgs.msg import Image
 
 from ..core.camera import FrameSource
-from ..core.config import load_config
 
 ENCODINGS = {"bgr8": (3, None), "rgb8": (3, cv2.COLOR_RGB2BGR), "mono8": (1, cv2.COLOR_GRAY2BGR),
              "bgra8": (4, cv2.COLOR_BGRA2BGR), "rgba8": (4, cv2.COLOR_RGBA2BGR)}
@@ -44,81 +40,53 @@ def bgr_to_image_msg(img: np.ndarray, stamp, frame_id: str) -> Image:
     return msg
 
 
-class VisionNode(Node):
-    """Loads the YAML, opens the camera section, runs ``process(frame)`` at ``rate_hz``."""
+class Grabber:
+    """Latest frame from a camera/file (FrameSource thread) or a ROS image topic.
 
-    camera_key = ""
-    debug_topic = ""
+    No inference happens here: grabbing keeps a fresh still ready so a read
+    request never waits for camera start-up or auto-exposure.
+    """
 
-    def __init__(self, name: str):
-        super().__init__(name)
-        self.declare_parameter("config_file", "")
-        path = self.get_parameter("config_file").value or os.path.join(
-            get_package_share_directory("poker_vision"), "config", "vision.yaml")
-        self.cfg = load_config(path)
-        self.base_dir = self.cfg["_base_dir"]
-        self.cam_cfg = self.cfg[self.camera_key]
-        self.frame_id = self.cam_cfg.get("frame_id", self.camera_key)
-        self.show = bool(self.cfg.get("debug", {}).get("show_window", False))
-        self.publish_debug = bool(self.cfg.get("debug", {}).get("publish_image", True))
-        self.debug_pub = self.create_publisher(Image, self.debug_topic, 1) if self.publish_debug else None
-        self.get_logger().info(f"{name}: config {path}")
-
+    def __init__(self, node, cam_cfg: dict, base_dir: str, callback_group=None):
+        self.cfg = cam_cfg
         self.source: Optional[FrameSource] = None
-        self._ros_frame = None
-        src = self.cam_cfg.get("source", 0)
+        self._frame, self._stamp = None, 0.0
+        self._lock = threading.Lock()
+        src = cam_cfg.get("source", 0)
         if isinstance(src, str) and src.startswith("ros:"):
-            topic = src[4:]
-            self.create_subscription(Image, topic, self._on_image, 1)
-            self.get_logger().info(f"subscribing to {topic}")
+            node.create_subscription(Image, src[4:], self._on_image, 1, callback_group=callback_group)
+            self.desc = f"topic {src[4:]}"
         else:
-            self.source = FrameSource(self.cam_cfg, self.base_dir)
-            self.get_logger().info(f"camera source {src!r}")
-        self._frames = 0
-        self._t_stats = time.monotonic()
-        self._busy = False
-        self.create_timer(1.0 / float(self.cam_cfg.get("rate_hz", 10.0)), self._tick)
+            self.source = FrameSource(cam_cfg, base_dir)
+            self.desc = f"source {src!r}"
 
     def _on_image(self, msg: Image):
-        try:
-            self._ros_frame = image_msg_to_bgr(msg)
-        except ValueError as e:
-            self.get_logger().error(str(e), throttle_duration_sec=5.0)
+        img = image_msg_to_bgr(msg)
+        with self._lock:
+            self._frame, self._stamp = img, time.monotonic()
 
-    def _tick(self):
-        if self._busy:
-            return
-        frame = self._ros_frame if self.source is None else self.source.read()[0]
-        if frame is None:
-            self.get_logger().warning("no camera frame yet", throttle_duration_sec=5.0)
-            return
-        self._busy = True
-        try:
-            debug = self.process(frame)
-        except Exception as e:  # keep the node alive on a bad frame
-            self.get_logger().error(f"processing failed: {e!r}", throttle_duration_sec=2.0)
-            debug = None
-        finally:
-            self._busy = False
-        if debug is not None:
-            if self.debug_pub is not None:
-                self.debug_pub.publish(bgr_to_image_msg(debug, self.get_clock().now().to_msg(), self.frame_id))
-            if self.show:
-                cv2.imshow(self.get_name(), debug)
-                cv2.waitKey(1)
-        self._frames += 1
-        if time.monotonic() - self._t_stats >= 10.0:
-            fps = self._frames / (time.monotonic() - self._t_stats)
-            self.get_logger().info(f"{fps:.1f} frames/s; {self.stats()}")
-            self._frames, self._t_stats = 0, time.monotonic()
+    def latest(self):
+        if self.source is not None:
+            return self.source.read()
+        with self._lock:
+            return (None if self._frame is None else self._frame.copy()), self._stamp
 
-    def process(self, frame: np.ndarray):
-        raise NotImplementedError
+    def fresh_frames(self, count: int = 1, after: Optional[float] = None, timeout: float = 2.0) -> List[np.ndarray]:
+        """``count`` distinct frames captured after ``after`` (default: now)."""
+        after = time.monotonic() if after is None else after
+        deadline = time.monotonic() + timeout
+        frames, last = [], after
+        while len(frames) < count and time.monotonic() < deadline:
+            frame, stamp = self.latest()
+            if frame is not None and (stamp > last or (self.source is not None and self.source.still is not None)):
+                frames.append(frame)
+                last = stamp
+                if self.source is not None and self.source.still is not None:
+                    frames.extend([frame] * (count - len(frames)))   # still image: same frame
+            else:
+                time.sleep(0.01)
+        return frames
 
-    def stats(self) -> str:
-        return ""
-
-    def destroy_node(self):
+    def close(self):
         if self.source is not None:
             self.source.close()
-        super().destroy_node()

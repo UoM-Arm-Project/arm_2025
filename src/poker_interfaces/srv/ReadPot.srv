@@ -1,0 +1,9 @@
+# Photograph the side camera once and value the chips in the pot.
+---
+bool success
+string message
+float32 value          # total chip value
+float32 confidence     # mean detection confidence (1.0 for a clearly empty pot)
+string[] chip_classes  # e.g. White, Red, Blue
+int32[] chip_counts    # chips counted per class, same order
+float32 inference_ms

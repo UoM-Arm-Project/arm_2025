@@ -24,6 +24,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/GameState.msg"
   "action/PokerAction.action"
   "action/DealerAction.action"
+  "srv/ReadCards.srv"
+  "srv/ReadPot.srv"
   DEPENDENCIES action_msgs std_msgs
 )
 

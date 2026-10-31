@@ -48,15 +48,23 @@ class UltralyticsBackend:
         self.conf = float(cfg.get("conf", 0.5))
         self.iou = float(cfg.get("iou", 0.6))
         self.max_det = int(cfg.get("max_det", 100))
+        classes = cfg.get("classes")                # e.g. [1, 2, 3]: drop class 0 inside NMS
+        self.classes = [int(c) for c in classes] if classes else None
+        self.retina_masks = bool(cfg.get("retina_masks", False))
         self.last_latency_ms = 0.0
 
     def warmup(self, shape=(480, 640, 3)) -> None:
         self(np.zeros(shape, dtype=np.uint8))
 
-    def __call__(self, image: np.ndarray) -> List[Detection]:
+    def __call__(self, image: np.ndarray, offset=(0, 0)) -> List[Detection]:
         t0 = time.perf_counter()
-        res = self.model.predict(image, conf=self.conf, iou=self.iou, imgsz=self.imgsz, device=self.device,
-                                 half=self.half, max_det=self.max_det, verbose=False)[0]
+        kwargs = dict(conf=self.conf, iou=self.iou, imgsz=self.imgsz, device=self.device,
+                      max_det=self.max_det, classes=self.classes, verbose=False)
+        if self.half:
+            kwargs["half"] = True              # only pass when used (newer ultralytics renames it)
+        if self.retina_masks:
+            kwargs["retina_masks"] = True
+        res = self.model.predict(image, **kwargs)[0]
         out: List[Detection] = []
         names = res.names
         if res.boxes is not None and len(res.boxes):
@@ -72,7 +80,11 @@ class UltralyticsBackend:
 
 
 class MockBackend:
-    """Fixed detections from YAML: [{name, xyxy: [x1,y1,x2,y2], conf, polygon: [[x,y],...]}]."""
+    """Fixed detections from YAML: [{name, xyxy: [x1,y1,x2,y2], conf, polygon: [[x,y],...]}].
+
+    Coordinates are in the full image; when the reader passes a crop it also
+    passes ``offset`` so the mock returns them relative to the crop.
+    """
 
     def __init__(self, cfg: dict, base_dir: str = ""):
         self.items = []
@@ -85,8 +97,17 @@ class MockBackend:
     def warmup(self, shape=None) -> None:
         pass
 
-    def __call__(self, image: np.ndarray) -> List[Detection]:
-        return list(self.items)
+    def __call__(self, image: np.ndarray, offset=(0, 0)) -> List[Detection]:
+        ox, oy = offset
+        h, w = image.shape[:2]
+        out = []
+        for d in self.items:
+            box = d.xyxy - np.array([ox, oy, ox, oy])
+            cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+            if 0 <= cx < w and 0 <= cy < h:                     # only what the crop contains
+                poly = None if d.polygon is None else d.polygon - np.array([ox, oy])
+                out.append(Detection(d.name, d.conf, box, poly))
+        return out
 
 
 def make_backend(cfg: dict, base_dir: str = ""):

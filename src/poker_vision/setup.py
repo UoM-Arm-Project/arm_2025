@@ -23,8 +23,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'card_detector = poker_vision.nodes.card_detector_node:main',
-            'pot_estimator = poker_vision.nodes.pot_estimator_node:main',
+            'vision_server = poker_vision.nodes.vision_server_node:main',
             'vision_probe = poker_vision.tools.probe:main',
             'export_model = poker_vision.tools.export_model:main',
             'make_marker = poker_vision.tools.make_marker:main',

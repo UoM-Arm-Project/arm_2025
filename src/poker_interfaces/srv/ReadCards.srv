@@ -1,0 +1,8 @@
+# Photograph the overhead camera once and read the cards inside one zone.
+string zone            # board | bot_hole | seat_<n>  (zones are defined in poker_vision's vision.yaml)
+uint8 expected         # how many cards should be there (0 = don't check)
+---
+bool success           # true when the read is clean and matches `expected`
+string message
+CardDetection[] cards  # code, zone, table-frame x/y, confidence
+float32 inference_ms

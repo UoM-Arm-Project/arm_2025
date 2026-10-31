@@ -26,6 +26,6 @@ patch_package poker_dashboard dashboard
 patch_package poker_gpio poker_gpio
 patch_package poker_demo pick_demo
 patch_package poker_logic game_manager skill_executor table_console poker_sim
-patch_package poker_vision card_detector pot_estimator vision_probe export_model make_marker
+patch_package poker_vision vision_server vision_probe export_model make_marker
 
 echo "Shebangs patched to use venv Python."

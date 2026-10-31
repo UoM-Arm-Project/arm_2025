@@ -5,25 +5,22 @@ poker_game_manager:
     seats: 5                  # physical chairs including the bot (2-6)
     bot_seat: 0               # chair the bot plays from; ignored in dealer mode
     first_button: 0
-    small_blind: 5
-    big_blind: 10
-    starting_stack: 1000
-    chip_unit: 5              # smallest chip value; bets snap to this
+    small_blind: 1
+    big_blind: 2
+    starting_stack: 200
+    chip_unit: 1              # smallest chip value (White = 1); bets snap to this
 
     policy: equity            # equity | baseline
     samples: 600              # Monte Carlo samples per decision (lower on a Pi)
     style: balanced           # cautious | balanced | active
     range_model: public_actions
 
-    pot_settle_s: 0.8         # wait after a press before trusting the pot reading
-    pot_min_samples: 3
+    pot_settle_s: 0.8         # wait after a turn press before photographing the pot
     pot_tolerance: -1.0       # chips; <0 = half the chip unit
     gesture_on_check: true
-
-    card_window: 10           # frames for card debouncing
-    card_ratio: 0.7
-    card_min_confidence: 0.5
-    pot_min_confidence: 0.3
+    verify_bot_chips: true    # photograph the pot after the bot's chips land
+    read_retries: 1           # automatic re-reads before asking the operator
+    vision_timeout_s: 30.0    # a read taking longer than this counts as failed
 
     use_gpio_button: true     # treat any /button_count change as "turn done"
-    zones_file: ""            # empty = <share>/config/vision_zones.yaml
+

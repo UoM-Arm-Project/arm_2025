@@ -1,6 +1,7 @@
 """poker_table_console: type table events instead of using buttons / cameras.
 
-Useful for bring-up before the vision nodes exist, and as an operator override.
+Useful for bring-up before the cameras work, and as an operator override.
+Overrides answer the game's camera reads instead of the vision_server.
 
 Commands
     d | done                  current player finished (= the turn button)
@@ -8,9 +9,9 @@ Commands
     n | next                  start the next hand
     act <seat|-> <fold|check|call|raise> [raise_to]
                               apply an action directly (operator override)
-    cards <zone> [c1 c2 ...]  pretend vision sees these cards in a zone
+    cards <zone> [c1 c2 ...]  next read of that zone returns these cards
                               (board, bot_hole, seat_3 ...); no cards clears it
-    pot <value> | pot off     publish a fake /vision/pot reading at 5 Hz
+    pot <value> | pot off     pot reads return this value / use the pot camera again
     add <chips>               add chips to the fake pot (a player bets)
     s | state                 print the latest /poker/state
     q | quit
@@ -22,29 +23,23 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
-from poker_interfaces.msg import GameState, PlayerInput, PotEstimate
+from poker_interfaces.msg import GameState, PlayerInput
 
 
 class TableConsole(Node):
     def __init__(self):
         super().__init__("poker_table_console")
         self.input_pub = self.create_publisher(PlayerInput, "/poker/input", 10)
-        self.pot_pub = self.create_publisher(PotEstimate, "/vision/pot", 10)
         self.create_subscription(GameState, "/poker/state", self._on_state, 10)
         self.create_subscription(String, "/poker/announce", lambda m: print(f"  >> {m.data}"), 10)
         self.fake_pot = None
         self.state = None
-        self.create_timer(0.2, self._publish_pot)
 
     def _on_state(self, msg):
         self.state = msg
 
-    def _publish_pot(self):
-        if self.fake_pot is not None:
-            m = PotEstimate()
-            m.header.stamp = self.get_clock().now().to_msg()
-            m.value, m.confidence = float(self.fake_pot), 1.0
-            self.pot_pub.publish(m)
+    def _send_pot(self):
+        self.send(PlayerInput.SET_POT, pot_value=-1.0 if self.fake_pot is None else self.fake_pot)
 
     def send(self, event, **kw):
         m = PlayerInput()
@@ -54,6 +49,7 @@ class TableConsole(Node):
         m.raise_to = int(kw.get("raise_to", 0))
         m.zone = kw.get("zone", "")
         m.cards = list(kw.get("cards", []))
+        m.pot_value = float(kw.get("pot_value", 0.0))
         self.input_pub.publish(m)
 
     def handle_line(self, line: str) -> bool:
@@ -77,8 +73,10 @@ class TableConsole(Node):
             self.send(PlayerInput.SET_CARDS, zone=args[0], cards=args[1:])
         elif cmd == "pot" and args:
             self.fake_pot = None if args[0] == "off" else float(args[0])
+            self._send_pot()
         elif cmd == "add" and args:
             self.fake_pot = (self.fake_pot or 0.0) + float(args[0])
+            self._send_pot()
             print(f"  fake pot = {self.fake_pot:.0f}")
         elif cmd in ("s", "state"):
             s = self.state
@@ -87,7 +85,7 @@ class TableConsole(Node):
             else:
                 print(f"  hand {s.hand_number} {s.stage}/{s.phase} actor={s.actor} button={s.button} "
                       f"pot={s.pot} board={list(s.board)}\n  stacks={list(s.stacks)} bets={list(s.bets)}"
-                      f"\n  waiting: {s.waiting}")
+                      f"\n  waiting for: {s.expect or 'nothing (busy)'} | {s.waiting}")
         else:
             print(__doc__)
         return True

@@ -14,7 +14,8 @@ from poker_logic.core.observation import LegalActions                           
 from poker_logic.core.policy import EquityBot, BotConfig, quantise_raise, scale_threshold  # noqa: E402
 from poker_logic.core.skills import ArmState, MovePose, Pump, SkillCompiler, validate_layout  # noqa: E402
 from poker_logic.core.table import PhysicalTable, TableConfig                   # noqa: E402
-from poker_logic.core.tracker import CardTracker, PotTracker                    # noqa: E402
+from poker_logic.core.director import ArmCommand, DirectorConfig, GameDirector, VisionRequest  # noqa: E402
+from poker_logic.core.policy import BaselineBot                                  # noqa: E402
 from poker_logic.sim import build                                               # noqa: E402
 
 CONFIG = os.path.join(os.path.dirname(__file__), "..", "config")
@@ -130,19 +131,118 @@ def test_showdown_with_revealed_cards():
     assert t.stacks[0] == 1020 and sum(t.stacks.values()) == 3000
 
 
-# ---------------------------------------------------------------- trackers
-def test_card_tracker_debounce():
-    from poker_logic.core.equity import normalise
-    assert normalise("10h") == "Th" and normalise("qS") == "Qs"
-    tr = CardTracker(window=5, ratio=0.6)
-    for i in range(5):
-        dets = [("Ah", "board", 0.9), ("Kd", "board", 0.9)] + ([("2c", "board", 0.9)] if i == 0 else [])
-        tr.update(dets)
-    assert tr.stable("board") == ["Ah", "Kd"]
-    pt = PotTracker()
-    for i, v in enumerate([10, 11, 9, 50, 10]):
-        pt.add(i, v)
-    assert pt.value_since(0) == 10
+# ---------------------------------------------------------------- director: on-demand perception
+def _director(mode="player", seats=3, **kw):
+    t = PhysicalTable(TableConfig(seats=seats, bot_seat=None if mode == "dealer" else 0,
+                                  small_blind=1, big_blind=2, starting_stack=200, chip_unit=1))
+    d = GameDirector(t, DirectorConfig(mode=mode, pot_settle_s=0.0, verify_bot_chips=False,
+                                       gesture_on_check=False, **kw), BaselineBot())
+    return d
+
+
+def _drain(d):
+    """Collect outbox items; arm commands are completed instantly (the arm is not under test)."""
+    out = []
+    while d.outbox:
+        item = d.outbox.popleft()
+        out.append(item)
+        if isinstance(item, ArmCommand):
+            d.arm_finished(item.id, True, "ok", 0.0)
+            d.poll(0.0)
+    return out
+
+
+def test_no_reads_until_the_button_is_pressed():
+    d = _director(seats=4)
+    d.poll(0.0)
+    out = _drain(d)
+    assert d.expect == "hole"
+    assert not [o for o in out if isinstance(o, VisionRequest)]          # nothing until the press
+    assert any("DEALER" in getattr(o, "text", "") and "press the button" in o.text for o in out)
+    d.poll(1.0)
+    assert not _drain(d)                                                 # prompt announced once only
+    d.press_turn_done(2.0)
+    d.poll(2.0)
+    reqs = [o for o in _drain(d) if isinstance(o, VisionRequest)]
+    assert len(reqs) == 1 and reqs[0].zone == "bot_hole" and reqs[0].expected == 2
+    d.vision_done(reqs[0].id, True, cards=["Ah", "Kd"])
+    d.poll(2.1)
+    assert d.table.bot_hole_cards == ["Ah", "Kd"]
+    assert d.expect == "turn" and d.table.phase().seat == 3              # UTG is chair 3
+
+
+def test_bad_read_retries_then_asks_operator():
+    d = _director(read_retries=1)
+    d.poll(0.0)
+    d.press_turn_done(0.0)
+    d.poll(0.0)
+    r1 = [o for o in _drain(d) if isinstance(o, VisionRequest)][0]
+    d.vision_done(r1.id, False, "count mismatch", cards=["Ah"])
+    d.poll(0.1)
+    r2 = [o for o in _drain(d) if isinstance(o, VisionRequest)]
+    assert len(r2) == 1                                                  # automatic retry
+    d.vision_done(r2[0].id, False, "count mismatch", cards=["Ah"])
+    d.poll(0.2)
+    out = _drain(d)
+    assert not [o for o in out if isinstance(o, VisionRequest)]          # now waits for a press
+    assert d.expect == "hole"
+    assert any("Couldn't read the bot's two cards" in getattr(o, "text", "") for o in out)
+
+
+def test_turn_press_reads_pot_and_infers_call():
+    d = _director(seats=4)
+    d.poll(0.0)                                   # hand starts (overrides are cleared per hand)
+    d.set_manual_cards("bot_hole", ["Ah", "Kd"])
+    d.press_turn_done(0.0)
+    d.poll(0.0)
+    assert d.expect == "turn"
+    chair = d.table.phase().seat
+    owe = d.table.legal(chair).call_amount
+    _drain(d)
+    d.press_turn_done(1.0)
+    d.poll(1.0)
+    req = [o for o in _drain(d) if isinstance(o, VisionRequest)][0]
+    assert req.kind == "pot"
+    d.vision_done(req.id, True, value=d.table.pot + owe)
+    d.poll(1.1)
+    assert d.table.public_actions[-1].action == "call"
+
+
+def test_showdown_fold_button_mucks_and_manual_overrides():
+    d = _director(seats=2)
+    d.poll(0.0)
+    _drain(d)                                     # bot posts its blind first (arm)
+    d.set_manual_cards("bot_hole", ["2c", "7d"])
+    d.press_turn_done(0.0)
+    d.poll(0.0)
+    # play check/call to the river with manual actions, deal board via manual cards
+    def betting_round():
+        for _ in range(10):
+            _drain(d)
+            ph = d.table.phase()
+            if ph.kind != "bet":
+                return
+            if ph.seat != 0:
+                lg = d.table.legal(ph.seat)
+                d.manual_action(ph.seat, "call" if lg.can_call else "check")
+            d.poll(0.0)
+
+    for board in (["Ah", "Kh", "Qh"], ["Ah", "Kh", "Qh", "Jh"], ["Ah", "Kh", "Qh", "Jh", "3s"]):
+        betting_round()
+        d.set_manual_cards("board", board)
+        assert d.expect == "board"
+        d.press_turn_done(0.0)
+        d.poll(0.0)
+    betting_round()
+    while d.table.phase().kind == "showdown":
+        if d.table.phase().seat == 0:
+            d.poll(0.0)
+        else:
+            assert d.expect == "showdown"
+            d.press_fold(0.0)                 # fold button = muck at showdown
+            d.poll(0.0)
+    assert d.table.phase().kind == "over"
+    assert d.expect == "next"
 
 
 # ---------------------------------------------------------------- skills
@@ -151,10 +251,10 @@ def test_layout_and_skills():
         layout = yaml.safe_load(f)
     assert validate_layout(layout, 5) == []
     sc = SkillCompiler(layout)
-    steps, state, change = sc.bot_action("raise", 135, ArmState())
-    assert change == {100: 1, 25: 1, 5: 2}
+    steps, state, change = sc.bot_action("raise", 17, ArmState())
+    assert change == {10: 1, 5: 1, 1: 2}                    # blue, red, 2 x white
     assert sum(isinstance(s, Pump) and s.on for s in steps) == 4
-    assert state.tray_counts[5] == 28
+    assert state.tray_counts[1] == 28
     assert all(isinstance(s, (MovePose, Pump)) for s in steps)
     steps, state, _ = sc.dealer_action("deal_board", ArmState(deck_count=52), index=2)
     assert state.deck_count == 51
@@ -169,5 +269,6 @@ def test_simulated_games(mode, seats):
     world = build(mode, seats=seats, seed=seats * 7, samples=80)
     played = world.run(15)
     assert played >= 1
-    assert sum(world.t.stacks.values()) == seats * 1000
+    assert sum(world.t.stacks.values()) == seats * 200
+    assert world.reads["cards"] + world.reads["pot"] > 0
     assert not [m for m in world.messages if m.level == "error"]

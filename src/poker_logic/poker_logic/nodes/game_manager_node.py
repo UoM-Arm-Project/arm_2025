@@ -1,37 +1,36 @@
-"""poker_game_manager: vision + buttons in, bot decisions / dealer moves out.
+"""poker_game_manager: buttons in, on-demand camera reads, bot decisions / dealer moves out.
 
 Subscribes
-    /vision/cards     poker_interfaces/CardDetectionArray   (every overhead frame)
-    /vision/pot       poker_interfaces/PotEstimate          (side camera)
     /poker/input      poker_interfaces/PlayerInput          (console / dashboard / extra buttons)
     /button_count     std_msgs/Int32                        (existing poker_gpio button, optional)
+Service clients (poker_vision's vision_server)
+    /vision/read_cards  poker_interfaces/ReadCards          (called only when cards must be known)
+    /vision/read_pot    poker_interfaces/ReadPot            (called only after a turn press)
 Publishes
-    /poker/state      poker_interfaces/GameState            (2 Hz and on change)
-    /poker/announce   std_msgs/String                       (what the table should hear/see)
+    /poker/state      poker_interfaces/GameState            (2 Hz)
+    /poker/announce   std_msgs/String                       (instructions: who presses, when)
 Action clients
     /poker/bot_action     poker_interfaces/PokerAction      (served by poker_skill_executor)
     /poker/dealer_action  poker_interfaces/DealerAction
 
 All game logic lives in poker_logic.core.GameDirector; this node only converts
 messages and runs it on a timer (single-threaded executor, no locks needed).
+Service calls are asynchronous, so a slow CPU inference never blocks the node.
 """
-import os
 import time
 
 import rclpy
-import yaml
-from ament_index_python.packages import get_package_share_directory
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_msgs.msg import Int32, String
 
 from poker_interfaces.action import DealerAction, PokerAction
-from poker_interfaces.msg import CardDetectionArray, GameState, PlayerInput, PotEstimate
+from poker_interfaces.msg import GameState, PlayerInput
+from poker_interfaces.srv import ReadCards, ReadPot
 
-from ..core.director import Announce, ArmCommand, DirectorConfig, GameDirector
+from ..core.director import Announce, ArmCommand, DirectorConfig, GameDirector, VisionRequest
 from ..core.policy import BotConfig, make_policy
 from ..core.table import PhysicalTable, TableConfig
-from ..core.tracker import CardTracker, PotTracker, Zone, assign_zone
 
 BOT_TYPES = {
     "fold": PokerAction.Goal.FOLD,
@@ -64,16 +63,16 @@ class GameManagerNode(Node):
         self.director = GameDirector(
             table,
             DirectorConfig(mode=mode, pot_settle_s=float(p["pot_settle_s"]),
-                           pot_min_samples=int(p["pot_min_samples"]),
                            pot_tolerance=None if tol < 0 else tol,
-                           gesture_on_check=bool(p["gesture_on_check"])),
-            policy,
-            CardTracker(int(p["card_window"]), float(p["card_ratio"]), float(p["card_min_confidence"])),
-            PotTracker(float(p["pot_min_confidence"])))
-        self.zones = self._load_zones(p["zones_file"])
+                           gesture_on_check=bool(p["gesture_on_check"]),
+                           verify_bot_chips=bool(p["verify_bot_chips"]),
+                           read_retries=int(p["read_retries"])),
+            policy)
+        self.vision_timeout = float(p["vision_timeout_s"])
+        self.cards_client = self.create_client(ReadCards, "/vision/read_cards")
+        self.pot_client = self.create_client(ReadPot, "/vision/read_pot")
+        self._vision_deadline = None
 
-        self.create_subscription(CardDetectionArray, "/vision/cards", self._on_cards, 10)
-        self.create_subscription(PotEstimate, "/vision/pot", self._on_pot, 10)
         self.create_subscription(PlayerInput, "/poker/input", self._on_input, 10)
         self._last_button = None
         if p["use_gpio_button"]:
@@ -91,35 +90,19 @@ class GameManagerNode(Node):
     # ------------------------------------------------------------------ params
     def _declare_params(self):
         defaults = dict(
-            mode="player", seats=5, bot_seat=0, first_button=0, small_blind=5, big_blind=10,
-            starting_stack=1000, chip_unit=5, policy="equity", samples=600, style="balanced",
-            range_model="public_actions", pot_settle_s=0.8, pot_min_samples=3, pot_tolerance=-1.0,
-            gesture_on_check=True, card_window=10, card_ratio=0.7, card_min_confidence=0.5,
-            pot_min_confidence=0.3, use_gpio_button=True, zones_file="")
+            mode="player", seats=5, bot_seat=0, first_button=0, small_blind=1, big_blind=2,
+            starting_stack=200, chip_unit=1, policy="equity", samples=600, style="balanced",
+            range_model="public_actions", pot_settle_s=0.8, pot_tolerance=-1.0,
+            gesture_on_check=True, verify_bot_chips=True, read_retries=1, vision_timeout_s=30.0,
+            use_gpio_button=True)
         for k, v in defaults.items():
             self.declare_parameter(k, v)
         return {k: self.get_parameter(k).value for k in defaults}
-
-    def _load_zones(self, path):
-        if not path:
-            path = os.path.join(get_package_share_directory("poker_logic"), "config", "vision_zones.yaml")
-        with open(path) as f:
-            data = yaml.safe_load(f) or {}
-        zones = [Zone(z["name"], z["x_min"], z["x_max"], z["y_min"], z["y_max"]) for z in data.get("zones", [])]
-        self.get_logger().info(f"loaded {len(zones)} vision zones from {path}")
-        return zones
 
     # ------------------------------------------------------------------ inputs
     @staticmethod
     def _now():
         return time.monotonic()
-
-    def _on_cards(self, msg: CardDetectionArray):
-        dets = [(c.code, c.zone or assign_zone(self.zones, c.x, c.y), c.confidence) for c in msg.cards]
-        self.director.cards.update(dets)
-
-    def _on_pot(self, msg: PotEstimate):
-        self.director.pot.add(self._now(), msg.value, msg.confidence)
 
     def _on_button(self, msg: Int32):
         prev, self._last_button = self._last_button, msg.data
@@ -141,6 +124,8 @@ class GameManagerNode(Node):
                 d.manual_action(seat, msg.action, msg.raise_to if msg.action == "raise" else None)
             elif msg.event == PlayerInput.SET_CARDS:
                 d.set_manual_cards(msg.zone, list(msg.cards))
+            elif msg.event == PlayerInput.SET_POT:
+                d.set_manual_pot(None if msg.pot_value < 0 else float(msg.pot_value))
         except ValueError as e:
             self._announce(Announce(f"Input rejected: {e}", "warn"))
 
@@ -155,17 +140,66 @@ class GameManagerNode(Node):
             item = self.director.outbox.popleft()
             if isinstance(item, ArmCommand):
                 self._send_arm(item)
+            elif isinstance(item, VisionRequest):
+                self._send_vision(item)
             else:
                 self._announce(item)
+        self._check_vision_timeout()
 
     def _announce(self, a: Announce):
-        if a.level == "error": 
+        # rclpy fixes one severity per call site, so each level needs its own call
+        if a.level == "error":
             self.get_logger().error(a.text)
-        elif a.level == "warn": 
+        elif a.level == "warn":
             self.get_logger().warning(a.text)
         else:
             self.get_logger().info(a.text)
         self.announce_pub.publish(String(data=a.text))
+
+    # ------------------------------------------------------------------ camera reads
+    def _send_vision(self, req: VisionRequest):
+        client = self.cards_client if req.kind == "cards" else self.pot_client
+        if not client.service_is_ready():
+            self.director.vision_done(req.id, False, "vision_server not running", now=self._now())
+            return
+        if req.kind == "cards":
+            srv = ReadCards.Request()
+            srv.zone, srv.expected = req.zone, int(req.expected)
+        else:
+            srv = ReadPot.Request()
+        self._vision_deadline = (req.id, self._now() + self.vision_timeout)
+        client.call_async(srv).add_done_callback(lambda f, r=req: self._on_vision(r, f))
+
+    def _on_vision(self, req: VisionRequest, fut):
+        self._vision_deadline = None
+        try:
+            res = fut.result()
+        except Exception as e:   # service died mid-call
+            self._guard(self.director.vision_done, req.id, False, f"vision call failed: {e}", now=self._now())
+            return
+        if req.kind == "cards":
+            codes = [c.code for c in res.cards]
+            self.get_logger().info(f"read {req.zone}: {codes} ({res.inference_ms:.0f} ms) {res.message}")
+            self._guard(self.director.vision_done, req.id, bool(res.success), res.message,
+                        cards=codes, now=self._now())
+        else:
+            self.get_logger().info(f"read pot: {res.value:.0f} ({res.inference_ms:.0f} ms) {res.message}")
+            self._guard(self.director.vision_done, req.id, bool(res.success), res.message,
+                        value=float(res.value), now=self._now())
+
+    def _guard(self, fn, *args, **kwargs):
+        """Run a director callback without letting a game-logic error kill the node."""
+        try:
+            fn(*args, **kwargs)
+        except Exception as e:
+            self.get_logger().error(f"director error: {e!r}")
+            self._announce(Announce(f"Game logic error: {e}", "error"))
+
+    def _check_vision_timeout(self):
+        if self._vision_deadline and self._now() > self._vision_deadline[1]:
+            req_id, _ = self._vision_deadline
+            self._vision_deadline = None
+            self.director.vision_done(req_id, False, "vision read timed out", now=self._now())
 
     # ------------------------------------------------------------------ arm
     def _send_arm(self, cmd: ArmCommand):
@@ -205,7 +239,7 @@ class GameManagerNode(Node):
         self._arm_done(cmd, ok, res.message if res else "no result")
 
     def _arm_done(self, cmd, ok, message):
-        self.director.arm_finished(cmd.id, ok, message, self._now())
+        self._guard(self.director.arm_finished, cmd.id, ok, message, self._now())
 
     # ------------------------------------------------------------------ state
     def _publish_state(self):
@@ -216,6 +250,7 @@ class GameManagerNode(Node):
         m.mode = d.cfg.mode
         m.hand_number = t.hand_number
         m.waiting = d.waiting
+        m.expect = d.expect
         m.arm_busy = d._pending_arm is not None
         m.pot_bias = float(d._bias)
         m.bot_seat = -1 if t.cfg.bot_seat is None else t.cfg.bot_seat
