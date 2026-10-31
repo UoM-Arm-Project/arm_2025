@@ -1,0 +1,11 @@
+# poker_vision Python deps -> install into the workspace .venv
+# GPU (CUDA 12 build of PyTorch); for CPU-only use --index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch
+torchvision
+ultralytics>=8.3
+opencv-python>=4.8
+pyyaml
+# optional speed-ups (see README "GPU, ONNX and TensorRT"):
+# onnx onnxslim onnxruntime-gpu
+# tensorrt

@@ -1,0 +1,95 @@
+# poker_vision configuration: cameras, table frame, models.
+# Paths may use ~ and $ENV vars; relative paths are relative to this file.
+# Swap model files / devices here without touching code:
+#   cards.pt  + device: cpu        -> works everywhere (slow)
+#   cards.pt  + device: cuda:0     -> PyTorch on the GTX 1650 (half: true)
+#   cards.onnx                     -> onnxruntime(-gpu); set task
+#   cards.engine                   -> TensorRT FP16, fastest; build with `export_model`
+
+overhead_camera:
+  source: 0                    # 0 | /dev/video2 | video.mp4 | still.jpg | ros:/camera/image_raw
+  width: 1920
+  height: 1080
+  fps: 30
+  fourcc: MJPG                 # most USB cams only reach 1080p30 in MJPG
+  autofocus: false             # fixed focus, as in the notebook (focus drift moves the scale)
+  rate_hz: 10                  # inference rate (frames processed per second)
+  frame_id: overhead_camera
+  # Intrinsics from the notebook (placeholder). Calibrate for real accuracy;
+  # all-zero dist_coeffs = no undistortion.
+  camera_matrix: [[1000.0, 0.0, 960.0],
+                  [0.0, 1000.0, 540.0],
+                  [0.0, 0.0, 1.0]]
+  dist_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+table_frame:
+  mode: homography             # homography (perspective-correct) | scale (notebook method)
+  dictionary: DICT_4X4_50
+  # Table-frame pose of each printed marker (centre x/y in metres, yaw in degrees).
+  # The first marker at (0, 0) defines the origin, like the notebook. Add 2-4
+  # markers near the table corners for accuracy across the whole table.
+  markers:
+    - {id: 0, size: 0.05, x: 0.0, y: 0.0, yaw_deg: 0.0}
+  reference_id: 0              # used by mode: scale
+  min_markers: 1
+  refresh_every: 5             # re-detect markers every N processed frames
+  smoothing: 0.7               # 0..1, damp jitter between fits
+  lock_after_frames: 0         # >0: freeze the fit after N good frames (camera never moves)
+  max_age_s: 0.0               # 0: keep the last good fit if markers get covered
+  corner_refinement: true
+
+card_model:
+  backend: ultralytics         # ultralytics | mock
+  weights: ~/poker_arm_ws/models/cards.pt     # PLACEHOLDER: your trained corner model
+  task: detect
+  device: cpu                  # cuda:0 once the GPU works
+  half: false                  # true with cuda:0 / engine
+  imgsz: 640
+  conf: 0.5                    # notebook used conf 0.5, iou 0.6
+  iou: 0.6
+  max_det: 60
+  warmup: true
+  pair_max_distance_m: 0.12    # two corners of one card are < ~0.10 m apart
+  pair_max_distance_px: 500    # fallback before the table frame is known
+  class_map: {}                # only if class names are not like "AC", "10H", "5D"
+                               # e.g. {ace_of_spades: As}
+
+side_camera:
+  source: 1
+  width: 1280
+  height: 720
+  fps: 30
+  autofocus: false
+  rate_hz: 5
+  frame_id: side_camera
+
+pot_model:
+  backend: ultralytics
+  weights: ~/poker_arm_ws/models/chips-seg.pt # PLACEHOLDER: your chip segmentation model
+  task: segment
+  device: cpu
+  half: false
+  imgsz: 640
+  conf: 0.4
+  iou: 0.6
+  max_det: 100
+  warmup: true
+  # How masks become chips (see poker_vision/core/pot.py):
+  count_mode: stack_height     # stack_height | instance | area
+  px_per_chip: 6.0             # side-view stack height per chip, in pixels (measure once)
+  px2_per_chip: 900.0          # for count_mode: area
+  class_values:                # model class name -> chip value (PLACEHOLDER names)
+    chip_5: 5
+    chip_25: 25
+    chip_100: 100
+  default_value: 0             # unknown classes ignored
+  round_to: 5                  # snap the total to the smallest chip
+  roi: []                      # optional pixel polygon of the pot, e.g. [[400,300],[900,300],[900,650],[400,650]]
+
+# Optional fixed transform table frame -> arm base frame, used by vision_probe
+# to print arm coordinates (handy for teaching poses in arm_layout.yaml).
+arm_from_table: {x: 0.0, y: 0.0, yaw_deg: 0.0}
+
+debug:
+  publish_image: true          # /vision/cards/debug and /vision/pot/debug (view with rqt_image_view)
+  show_window: false           # OpenCV windows (needs a display)
