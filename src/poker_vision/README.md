@@ -103,7 +103,7 @@ python -m pytest src/poker_vision/test -q        # 24 synthetic-image tests, no 
 images as `source`. The whole chain was tested that way: button press → `read_cards` →
 crop → cards → bot hole cards, then button press → `read_pot` → ROI crop → "call".
 
-## GPU, ONNX and TensorRT (GTX 1650, 4 GB)
+## GPU, ONNX and TensorRT
 
 Switching is only a YAML change after exporting: `weights`, `task`, `device`, `half`.
 
@@ -114,16 +114,82 @@ Switching is only a YAML change after exporting: `weights`, `task`, `device`, `h
 | ONNX Runtime GPU | `weights: cards.onnx`, `task: detect`, `device: cuda:0` |
 | TensorRT FP16 | `weights: cards.engine`, `task: detect`, `device: cuda:0`, `half: true` |
 
-- **Getting CUDA (WSL2):** install a current NVIDIA *Windows* driver, then check
-  `nvidia-smi` inside Ubuntu. The CUDA 12 PyTorch wheels need no CUDA toolkit.
+- **Getting CUDA (WSL2):** install a current NVIDIA *Windows* driver (never a Linux driver
+  inside WSL), then check `nvidia-smi` inside Ubuntu. The PyTorch wheels need no CUDA toolkit.
+- **RTX 50-series (Blackwell, e.g. RTX 5050):** needs a PyTorch build for CUDA 12.8 or newer
+  (`requirements.txt` uses the cu128 index). Check with
+  `python -c "import torch; print(torch.cuda.get_arch_list())"`: the list must include `sm_120`.
 - **Exporting:** `ros2 run poker_vision export_model ~/poker_arm_ws/models/chips-seg.pt
   --format engine --half --imgsz 1280 --device 0`. Build TensorRT engines on the machine
   that runs them.
-- **Memory:** two large models in FP16 should fit in 4 GB because only one runs at a time.
+- **Memory:** two large models in FP16 fit easily in 8 GB, and in 4 GB because only one runs at a time.
   If VRAM is tight, keep the card model on GPU and the pot model on CPU; the two are
   configured separately.
 - **Pi 5:** a YOLOv8-l-seg at 1280 will be slow on the CPU alone. Plan on a smaller model
   (v8s/n-seg retrained at 1280) or an accelerator such as the Hailo AI HAT.
+
+## Phone as the pot camera (`source: snapshot`)
+
+A webcam frame is a compressed video frame. The chip model was trained on phone photos, and
+counting chips edge-on needs every chip edge sharp, so the side camera can instead be an
+iPhone that takes a **real photo for each pot read** (~2 s, 12 MP, or ~0.7 MB resized).
+
+How it works: the phone runs a looping Shortcut that long-polls `vision_server`. A read sets
+a request; the phone's poll answers `go-<id>`; the phone takes a photo and uploads it to
+`/upload?req=go-<id>`. Only a photo with the waiting read's id is used, so a photo that
+arrives after its read timed out never answers the next one.
+
+**1. Network.** The phone must reach the laptop, and the server runs in WSL, so use WSL
+mirrored networking: in `C:\Users\<you>\.wslconfig` put
+
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+
+then `wsl --shutdown`, and in an admin PowerShell allow inbound traffic into WSL:
+
+```powershell
+Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction Allow
+```
+
+With `vision_server` (or `vision_probe --camera --pot`) running, Safari on the phone should
+show `pong` at `http://<laptop-ip>:8765/ping` (laptop IP from `ipconfig` in Windows). Same
+Wi-Fi (eduroam works) or the phone's Personal Hotspot both work; the IP differs per network.
+
+**2. Shortcut "Poker Cam"** (Shortcuts app, new shortcut):
+
+```
+Number 10000
+Repeat Number times
+    Get contents of http://LAPTOP:8765/wait
+    If Contents of URL contains go
+        Take 1 photo with Back camera            (Show More: Show Camera Preview OFF)
+        Resize Photo to 2016 x Auto Height        (optional: smaller, fewer iOS prompts)
+        Convert Resized Image to JPEG             (Preserve Metadata on)
+        Get contents of http://LAPTOP:8765/upload?req=[Contents of URL]
+                                                  (Method POST, Request Body File: Converted Image)
+    Otherwise
+    End If
+End Repeat
+```
+
+`[Contents of URL]` is the variable from the first *Get contents* (it holds `go-<id>`).
+Insert it in the URL with the variable picker.
+
+**3. Phone settings:** Auto-Lock Never; Do Not Disturb; battery saver off (it slows photos
+to ~3 s); charging; Settings → Apps → Shortcuts → Advanced → *Allow Sharing Large Amounts of
+Data* on. Start the Shortcut after `vision_server` is up and leave Shortcuts on screen.
+
+**4. Orientation.** Shortcuts tags photos as portrait whatever the mount, so the server
+ignores the EXIF tag and applies `snapshot.rotate` (clockwise). Take one photo with
+`ros2 run poker_vision vision_probe --camera --pot --no-model` and set `rotate` until the
+chips are upright, then measure `roi` on that image.
+
+**Failures** come back in the ReadPot message and the log, e.g. *the phone has never polled
+(is the Shortcut running?)*, *no photo within 15 s after the phone was asked (check the
+phone for an 'Allow' prompt)*, *photo is HEIC: add 'Convert Image to JPEG'*. The game then
+retries and asks the operator as for any failed read.
 
 ## Cameras under WSL2
 

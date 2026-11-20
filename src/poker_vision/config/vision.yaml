@@ -71,11 +71,18 @@ card_model:
   class_map: {}                # classes are 10C, 2D ... QS: parsed directly, nothing needed
 
 side_camera:
-  source: 1
-  width: 1920
-  height: 1080
-  fps: 30
-  autofocus: false
+  # iPhone running the "Poker Cam" Shortcut: one real photo per pot read (~2 s).
+  # See README "Phone as the pot camera". For a webcam instead, e.g.:
+  #   source: 2, width: 1280, height: 720, fps: 30, fourcc: MJPG
+  source: snapshot
+  snapshot:
+    port: 8765                 # Shortcut URLs: http://<laptop-ip>:8765/wait and /upload?req=...
+    host: 0.0.0.0
+    hold_s: 20                 # how long one /wait poll is held open
+    timeout_s: 15              # a photo slower than this fails the read (game retries, then asks)
+    rotate: 0                  # 0|90|180|270 clockwise after decoding; set from the first photo
+    warmup: true               # one throwaway photo at start-up so the first real read is fast
+    require_id: true           # reject uploads without ?req= (protects against late photos)
   frame_id: side_camera
 
 pot_model:

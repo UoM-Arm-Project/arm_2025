@@ -6,14 +6,17 @@ Only the newest frame is kept, so inference never works on a stale backlog.
     "file.mp4" | "rtsp://..."  video file / network stream
     "image.jpg"                still image, returned every time (handy for tuning)
     "ros:/camera/image_raw"    handled by the node (subscribes to sensor_msgs/Image)
+    "snapshot"                 a phone takes a photo per read (see core/snapshot.py)
 """
 import os
 import threading
 import time
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import cv2
 import numpy as np
+
+from .snapshot import SnapshotCamera
 
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
 
@@ -26,14 +29,18 @@ def calibration(cam_cfg: dict) -> Tuple[Optional[np.ndarray], Optional[np.ndarra
 
 
 class FrameSource:
-    def __init__(self, cam_cfg: dict, base_dir: str = ""):
+    def __init__(self, cam_cfg: dict, base_dir: str = "", log: Optional[Callable[[str], None]] = None):
         src = cam_cfg.get("source", 0)
         self.still: Optional[np.ndarray] = None
+        self.snapshot: Optional[SnapshotCamera] = None
         self.cap = None
         self._frame: Optional[np.ndarray] = None
         self._stamp = 0.0
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        if isinstance(src, str) and src.strip().lower() == "snapshot":
+            self.snapshot = SnapshotCamera(cam_cfg.get("snapshot", {}), log)
+            return
         if isinstance(src, str) and src.lower().endswith(IMAGE_EXT):
             path = src if os.path.isabs(src) or not base_dir else os.path.join(base_dir, src)
             self.still = cv2.imread(os.path.expanduser(path))
@@ -77,13 +84,32 @@ class FrameSource:
             with self._lock:
                 self._frame, self._stamp = frame, time.monotonic()
 
+    def capture(self, timeout: Optional[float] = None) -> Tuple[Optional[np.ndarray], str]:
+        """A brand-new frame: a fresh photo for ``snapshot``, else the next streamed frame."""
+        if self.snapshot is not None:
+            return self.snapshot.capture(timeout)
+        if self.still is not None:
+            return self.still.copy(), "still image"
+        t_end = time.monotonic() + (2.0 if timeout is None else timeout)
+        _, since = self.read()
+        while time.monotonic() < t_end:
+            frame, stamp = self.read()
+            if frame is not None and stamp > since:
+                return frame, "ok"
+            time.sleep(0.01)
+        return None, "no new frame from the camera"
+
     def read(self) -> Tuple[Optional[np.ndarray], float]:
+        if self.snapshot is not None:
+            return self.snapshot.read()
         if self.still is not None:
             return self.still.copy(), time.monotonic()
         with self._lock:
             return (None if self._frame is None else self._frame.copy()), self._stamp
 
     def close(self):
+        if self.snapshot is not None:
+            self.snapshot.close()
         self._stop.set()
         if self.cap is not None:
             self.cap.release()

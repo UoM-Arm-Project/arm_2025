@@ -6,6 +6,8 @@
     ros2 run poker_vision vision_probe --image table.jpg --click               # click -> table/arm coords
     ros2 run poker_vision vision_probe --camera --zone board                   # live: press r to read
     ros2 run poker_vision vision_probe --image table.jpg --zone board --full   # no crop, for comparison
+    ros2 run poker_vision vision_probe --camera --pot                          # side camera; with
+        source: snapshot each read (start, then r) asks the phone for a new photo
 
 Use --click (zones are drawn) to measure the zone rectangles for vision.yaml.
 """
@@ -19,7 +21,7 @@ import numpy as np
 from ..core.camera import FrameSource, calibration
 from ..core.config import load_config
 from ..core.detector import make_backend
-from ..core.reader import CardRead, CardReader, PotReader, draw_cards, draw_pot
+from ..core.reader import CardRead, CardReader, PotRead, PotReader, draw_cards, draw_pot
 from ..core.table_frame import TableFrame, arm_from_table
 from ..core.zones import load_zones
 
@@ -53,7 +55,16 @@ def main(argv=None):
     cam_cfg = dict(cfg["side_camera" if a.pot else "overhead_camera"])
     if a.image:
         cam_cfg["source"] = a.image
+    if str(cam_cfg.get("source")).strip().lower() == "snapshot":
+        cam_cfg["snapshot"] = dict(cam_cfg.get("snapshot") or {}, warmup=False)   # the first read wakes it
     src = FrameSource(cam_cfg, base)
+
+    def new_frame():
+        """Fresh photo for a snapshot camera (prints why if none came)."""
+        print("asking the phone for a photo ...")
+        f, msg = src.capture()
+        print(f"  {msg}")
+        return f
     zones = load_zones(cfg)
     K, D = calibration(cam_cfg)
     table = None if a.pot else TableFrame(cfg.get("table_frame", {}), K, D)
@@ -70,6 +81,13 @@ def main(argv=None):
             reader = CardReader(table, make_backend(mcfg, base), zones, mcfg)
 
     def read_once(frame):
+        if a.pot and reader is None:                    # --no-model: just show the photo (rotate/roi check)
+            img = draw_pot(frame, PotRead(True, "no model"))
+            print(f"side image {frame.shape[1]}x{frame.shape[0]}; roi {cfg['pot_model'].get('roi') or 'none'}")
+            roi = cfg["pot_model"].get("roi") or []
+            if len(roi) == 4:
+                cv2.rectangle(img, tuple(int(v) for v in roi[:2]), tuple(int(v) for v in roi[2:]), (255, 0, 0), 3)
+            return img
         if a.pot:
             r = reader.read(frame)
             if r.reading is not None:
@@ -113,10 +131,16 @@ def main(argv=None):
                 print(f"pixel ({u}, {v})")
 
     frame = None
+    if src.snapshot is not None:
+        frame = new_frame()
+        if frame is None:
+            src.close()
+            return 1
     while frame is None:
         frame, _ = src.read()
         cv2.waitKey(30) if frame is None else None
     annotated = read_once(frame)
+    state["hold"] = src.snapshot is not None          # a photo is not live video: keep the result up
     if a.save:
         cv2.imwrite(a.save, annotated)
     if not (a.camera or a.click):
@@ -139,6 +163,10 @@ def main(argv=None):
         key = cv2.waitKey(30) & 0xFF
         if key in (ord("q"), 27):
             break
+        if key == ord("r") and src.snapshot is not None:
+            frame = new_frame() if a.camera else frame
+            if frame is None:
+                continue
         if key == ord("r") and frame is not None:
             annotated = read_once(frame)
             state["hold"] = True

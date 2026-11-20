@@ -1,6 +1,7 @@
 # poker_vision Python deps -> install into the workspace .venv
-# GPU (CUDA 12 build of PyTorch); for CPU-only use --index-url https://download.pytorch.org/whl/cpu
---extra-index-url https://download.pytorch.org/whl/cu124
+# GPU: CUDA 12.8+ build of PyTorch (needed for RTX 50-series / Blackwell, sm_120; also fine for
+# older GPUs). For CPU-only use --index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://download.pytorch.org/whl/cu128
 torch
 torchvision
 ultralytics>=8.3

@@ -50,6 +50,7 @@ class Grabber:
     def __init__(self, node, cam_cfg: dict, base_dir: str, callback_group=None):
         self.cfg = cam_cfg
         self.source: Optional[FrameSource] = None
+        self.last_error = ""
         self._frame, self._stamp = None, 0.0
         self._lock = threading.Lock()
         src = cam_cfg.get("source", 0)
@@ -57,8 +58,10 @@ class Grabber:
             node.create_subscription(Image, src[4:], self._on_image, 1, callback_group=callback_group)
             self.desc = f"topic {src[4:]}"
         else:
-            self.source = FrameSource(cam_cfg, base_dir)
+            self.source = FrameSource(cam_cfg, base_dir, log=node.get_logger().info)
             self.desc = f"source {src!r}"
+            if self.source.snapshot is not None:
+                self.desc = f"phone snapshots on port {self.source.snapshot.port}"
 
     def _on_image(self, msg: Image):
         img = image_msg_to_bgr(msg)
@@ -72,7 +75,21 @@ class Grabber:
             return (None if self._frame is None else self._frame.copy()), self._stamp
 
     def fresh_frames(self, count: int = 1, after: Optional[float] = None, timeout: float = 2.0) -> List[np.ndarray]:
-        """``count`` distinct frames captured after ``after`` (default: now)."""
+        """``count`` distinct frames captured after ``after`` (default: now).
+
+        For a ``snapshot`` source each frame is a new photo (timeout per photo comes
+        from snapshot.timeout_s). On failure ``last_error`` says why.
+        """
+        self.last_error = ""
+        if self.source is not None and self.source.snapshot is not None:
+            frames = []
+            for _ in range(count):
+                frame, msg = self.source.capture()
+                if frame is None:
+                    self.last_error = msg
+                    break
+                frames.append(frame)
+            return frames
         after = time.monotonic() if after is None else after
         deadline = time.monotonic() + timeout
         frames, last = [], after
@@ -85,6 +102,8 @@ class Grabber:
                     frames.extend([frame] * (count - len(frames)))   # still image: same frame
             else:
                 time.sleep(0.01)
+        if len(frames) < count:
+            self.last_error = f"only {len(frames)} of {count} frame(s) within {timeout:.0f} s"
         return frames
 
     def close(self):

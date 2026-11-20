@@ -10,8 +10,9 @@ Publishes (one message per read, for logging / rqt)
     /vision/pot/debug    sensor_msgs/Image   annotated still of the last pot read
 
 The cameras keep grabbing frames on background threads (cheap), so a fresh
-still is ready the moment poker_game_manager asks. Models only run inside a
-service call. Each service has its own callback group, so a slow pot read on
+still is ready the moment poker_game_manager asks. A ``snapshot`` camera (a
+phone running the "Poker Cam" Shortcut) instead takes one real photo per read,
+~2 s. Models only run inside a service call. Each service has its own callback group, so a slow pot read on
 CPU does not block a card read.
 """
 import os
@@ -93,7 +94,8 @@ class VisionServer(Node):
     def _read_cards(self, req, res):
         frames = self.overhead.fresh_frames(self.card_shots)
         if not frames:
-            res.success, res.message = False, "no frame from the overhead camera"
+            res.success, res.message = False, f"no frame from the overhead camera: {self.overhead.last_error}"
+            self.get_logger().warning(res.message)
             return res
         try:
             read = self.card_reader.read(frames, req.zone, int(req.expected))
@@ -122,7 +124,8 @@ class VisionServer(Node):
     def _read_pot(self, req, res):
         frames = self.side.fresh_frames(1)
         if not frames:
-            res.success, res.message = False, "no frame from the side camera"
+            res.success, res.message = False, f"no frame from the side camera: {self.side.last_error}"
+            self.get_logger().warning(res.message)
             return res
         try:
             read = self.pot_reader.read(frames[0])
